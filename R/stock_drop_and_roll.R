@@ -1,81 +1,50 @@
-# StockWindow ----------------------------------------------------------------------------
+###############################################################################
 
-StockWindow <- function(stock, start = "min", end = "max") {
-  # Returns a window of stock history given by start and end dates
-
-  # Args:
-  #   stock: output of StockData()
-  #   start: first day of stock price to include; defaults to first available in data
-  #   end  : last day of stock price to include; defaults to last available in data
-
-  # Returns:
-  #   a data frame just like StockData() but with a smaller range of time values
-
-  # Supply defaults
-  if(start == "min") start <- min(stock$date)
-  if(end == "max")   end   <- max(stock$date)
-
-  # Return output
-  out <- stock[stock$date >= start & stock$date <= end, ]
-  structure(out, class = c("stock_window"))
-}
-
-
-
-# plot.stock_window ---------------------------------------------------------------------
-
-plot.stock_window <- function(x, time, ...) {
-  # Simple plotting utility for class stock_window
+ComputePercentChange <- function(stock, plotit = FALSE) {
+  # Computes the value percent change in stock value for open and close times
 
   # Args:
-  #   x: object of class stock_window
-  #   time: "open" or "close"
-
-  # Checks
-  if(!(time %in% c("open", "close"))) stop("Please supply 'open' or 'close' to time argument.")
-
-  x <- as.data.frame(unclass(x))
-
-  ggplot(x, aes_string(x = "date", y = time)) +
-    geom_line(lwd = 1.2) +
-    theme_bw()
-}
-
-
-
-# StockChange --------------------------------------------------------------------------
-
-PercentChange <- function(stock, start = "min", end = "max", time = "open", plotit = FALSE) {
-  # Computes the value change of the stock between two dates
-
-  # Args:
-  #   stock:  output of StockData()
-  #   start:  first day of stock price to include; defaults to first available in data
-  #   end  :  last day of stock price to include; defaults to last available in data
-  #   time :  the time of day to use for computation ("open" or "close")
-  #   plotit: whether to plot the results
-
-  data <- StockWindow(stock, start = start, end = end)
-
-  first_value <- head(data[[time]], 1)
-  last_value  <- tail(data[[time]], 1)
-
-  price_change  <- last_value - first_value
-  percent_change <- price_change / first_value * 100
+  #   stock:  object of class stock
+  #   plotit: whether to plot the stock values
 
   if(plotit) {
-    p <- plot(StockWindow(stock, start = start, end = end), time = time)
-    print(p)
+    p <- plot(stock)
+    on.exit(print(p))
   }
 
-  structure(round(percent_change, 4),
-            first_price = first_value,
-            last_price = last_value,
-            price_change = round(price_change, 2))
+  n_obs       <- nrow(stock$data)
+  change_data <- stock$data[c(1, n_obs), c("date", "open", "close")]
+
+  pct_change_open  <- round(.ComputePercentageChange(change_data$open), 4)
+  pct_change_close <- round(.ComputePercentageChange(change_data$close), 4)
+
+  open_change <- structure(pct_change_open,
+                           price_change = round(diff(change_data$open), 2))
+  close_change <- structure(pct_change_close,
+                            price_change = round(diff(change_data$close), 2))
+
+  out <- structure(list(open  = open_change,
+                        close = close_change),
+                   data = change_data)
+
+  return(out)
 }
 
 
-PriceChange <- function(stock, start = "min", end = "max", time = "open") {
+################################################################################
+
+.ComputePercentageChange <- function(vector) {
+  if(length(vector != 2)) stop("Problem with input vector in .ComputePercentageChange")
+  first <- vector[1]
+  last  <- vector[2]
+  absolute_change <- last - first
+  percent_change  <- absolute_change / first * 100
+}
+
+
+################################################################################
+
+ComputePriceChange <- function(stock) {
   # Simple wrapper around PercentChange to get price change; returns no other information.
 
   # Args:
@@ -84,34 +53,38 @@ PriceChange <- function(stock, start = "min", end = "max", time = "open") {
   # Returns:
   #   length-1 numeric.
 
-  attr(PercentChange(stock, start, end, time), "price_change")
+  pct_change <- ComputePercentChange(stock, plotit = FALSE)
+  out <- list(open  = attr(pct_change$open, "price_change"),
+             close = attr(pct_change$close, "price_change"))
+
+  return(out)
 }
 
 
 
 # StockChange -------------------------------------------------------------------------
 
-StockChangeCandidates <- function(stock, pct_change, window = 1, time = "open") {
+.FindStockChangeCandidates <- function(price, pct_change, window = 1) {
   # Determine the day on which a given percent change occurs within a given time window.
 
   # Args:
-  #   stock: output of StockData()
+  #   price: vector of stock prices under consideration
   #   pct_change: the desired percent change in stock price (positive or negative)
-  #   window: the time window (number of days) within which the change occurs.
-  #   time: the time of day at which the computations are made ("open" or "close")
+  #   window: the number of days within which the change occurs.
+
+  # Returns:
+  #   logical vector of length length(price) where TRUE indicates a candidate for
+  #   taking an action on the stock based on the pct_change criterion.
 
   # Checks
   if(pct_change == 0) stop("What are you even doing?")
   if(window < 1) stop("That's not a real time window.")
 
-  # Full price vector
-  price <- stock[[time]]
-
   # Take the appropriate lagged differences
   diffs <- diff(price, lag = window)
 
   # To get percent change we compare lagged differences to starting point
-  start_prices  <- price[1:(length(price) - window)]
+  start_prices  <- price[1L:(length(price) - window)]
   price_changes <- diffs / start_prices * 100
 
   # Padding for ineligible values at start of stock time window
@@ -128,14 +101,17 @@ StockChangeCandidates <- function(stock, pct_change, window = 1, time = "open") 
 
 # PostChangeBuyDate --------------------------------------------------------------
 
-PostChangeDate <- function(stock_change_candidates) {
-  # Calculate date of earliest stock change per run of TRUES coming from StockChangeCandidates
+.FindEarliestDateAmongConsecutives <- function(stock_change_candidates) {
+  # Calculate date of earliest stock change per run of TRUES coming from StockChangeCandidates.
+  # The purpose is to whittle down the candidates for action by keeping only the first candidate
+  # among many consecutive candidates.  This means we don't keep buying a stock as it keeps falling
+  # day after day; we rather buy once and wait for an increase downstream.
 
-  first_n_minus_1_cand <- head(stock_change_candidates, n = length(stock_change_candidates) - 1)
+  first_n_minus_1_cand <- head(stock_change_candidates, n = length(stock_change_candidates) - 1L)
   substraction_vector  <- c(FALSE, first_n_minus_1_cand)
 
   first_dates_are_greater_than_0 <- stock_change_candidates - substraction_vector
-  first_dates_post_change <- first_dates_are_greater_than_0 > 0
+  first_dates_post_change        <- first_dates_are_greater_than_0 > 0
 
   return(first_dates_post_change)
 }
@@ -143,13 +119,15 @@ PostChangeDate <- function(stock_change_candidates) {
 
 # PostChangeDateBuyDelay ----------------------------------------------------------
 
-PostChangeDateActionDelay <- function(post_change_date, delay = 0) {
+.AddWaitTimeBeforeAction <- function(action_date_candidates, delay = 0) {
   # Produce time delay between stock price change and date of action equal in number
   # of days to value 'delay'
 
-  delay_vector             <- rep(FALSE, times = delay)
-  post_change_date_trimmed <- head(post_change_date, n = length(post_change_date) - delay)
-  action_date_vector          <- c(delay_vector, post_change_date_trimmed)
+  trimmed_action_dates <- head(action_date_candidates,
+                               n = length(action_date_candidates) - delay)
+  delay_vector         <- rep(FALSE, times = delay)
+  action_date_vector   <- c(delay_vector, trimmed_action_dates)
+
   action_date_vector[length(action_date_vector)] <- FALSE  # to prevent action on last day
 
   return(action_date_vector)
@@ -159,7 +137,7 @@ PostChangeDateActionDelay <- function(post_change_date, delay = 0) {
 
 # FindStockPercentChanges ----------------------------------------------------------
 
-FindStockPercentChanges <- function(current_price, other_prices) {
+.FindStockPercentChanges <- function(current_price, other_prices) {
   # From a given price and a vector of other prices, find the % change of other prices
   # relative to current price.
   (other_prices - current_price) / current_price * 100
@@ -168,26 +146,27 @@ FindStockPercentChanges <- function(current_price, other_prices) {
 
 
 
-ProduceTrades <- function(stock, actions, threshold, time = "open") {
+.ProduceTrades <- function(price, actions, threshold) {
   # From vector of action dates, produce true actions and reversions using trade threshold
 
   # set up reversion vector
-  reversions <- rep(FALSE, times = nrow(stock))
+  reversions <- rep(FALSE, times = length(price))
 
   # Return if no actions taken
   if(sum(actions) == 0) {
-    return(list(actions    = reversions,
-                reversions = reversions))
+    out <- list(actions    = reversions,
+                reversions = reversions)
+    return(out)
   }
 
-  # Set up for loop if actions taken
-  CompareFun <- if(threshold < 0) `<` else `>`
+  # If actions taken, set up for a while-loop
+  .CompareFun <- if(threshold < 0) `<` else `>`
   i <- which(actions)[1L]
 
   while(TRUE) {
     # Find ALL timepoints when threshold is crossed, INCLUDING backwards in time
-    pct_changes           <- FindStockPercentChanges(stock[[time]][i], stock[[time]])
-    all_candidates        <- CompareFun(pct_changes, threshold)
+    pct_changes           <- .FindStockPercentChanges(price[i], price)
+    all_candidates        <- .CompareFun(pct_changes, threshold)
     all_candidates_ix     <- which(all_candidates)
 
     # if there are reversion candidates after this action, find the correct one;
@@ -214,52 +193,52 @@ ProduceTrades <- function(stock, actions, threshold, time = "open") {
     }
   }
 
-  list(actions    = actions,
-       reversions = reversions)
+  out <- list(actions    = actions,
+              reversions = reversions)
+  return(out)
 }
 
 
 # CalculateStockDropReturn -----------------------------------------------------------
 
-CalculateStockDropReturn <- function(stock, trades, budget, trade_fee,
-                                     threshold, time = "open") {
+.CalculateStockDropReturn <- function(price, trades, budget, trade_fee, threshold) {
   # Computes dollar return from the trade strategies given by actions and reversions
 
   # Args:
-  #   stock: output of StockData()
-  #   trades: list output of ProduceUsefulTrades()
+  #   price: vector of stock prices under consideration
+  #   trades: list output of .ProduceTrades()
   #   budget: the maximum dollar amount to invest at each buy
   #   trade_fee: the dollar fee for each trade
   #   threshold: the percent threshold that signals action; used to determine "buy" or "short"
-  #   time: the time of day at which to trade ("open" or "close")
 
-  action_prices    <- stock[[time]][trades$actions]
-  reversion_prices <- stock[[time]][trades$reversions]
+  action_prices    <- price[trades$actions]
+  reversion_prices <- price[trades$reversions]
 
   action_quantity   <- StockQty(budget, action_prices)
   action_dollars    <- action_quantity * action_prices
   reversion_dollars <- action_quantity * reversion_prices
 
-  n_trades <- sum(sapply(trades, sum))
+  n_trades_vector <- sapply(trades, sum)
+  n_trades        <- sum(n_trades_vector)
 
   if(threshold < 0) {
-    dollar_return    <- sum(reversion_dollars - action_dollars) - n_trades * trade_fee
+    dollars_net      <- sum(reversion_dollars - action_dollars) - n_trades * trade_fee
     dollars_invested <- sum(action_dollars) + n_trades * trade_fee
   } else {
-    dollar_return    <- sum(action_dollars - reversion_dollars) - n_trades * trade_fee
+    dollars_net      <- sum(action_dollars - reversion_dollars) - n_trades * trade_fee
     dollars_invested <- sum(reversion_dollars) + n_trades * trade_fee
   }
 
   percent_return <- if(n_trades > 0) {
-    dollar_return / dollars_invested * 100
+    dollars_net / dollars_invested * 100
   } else {
     0
   }
 
-  stock_drop_return <- list(return      = round(dollar_return, 2),
-                            amt_spent   = round(dollars_invested, 2),
-                            pct_return  = round(percent_return, 2),
-                            amt_pledged = budget * n_trades / 2L,
+  stock_drop_return <- list(net_return  = round(dollars_net, 2L),
+                            amt_spent   = round(dollars_invested, 2L),
+                            pct_return  = round(percent_return, 2L),
+                            amt_pledged = budget * n_trades / 2,
                             n_trades    = n_trades)
   return(stock_drop_return)
 }

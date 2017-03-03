@@ -2,15 +2,14 @@ library(ggplot2)
 load(file = "data/itw_hon_stock_data.rda")
 load(file = "data/ko_pep_stock_data.rda")
 
+source("R/get_datas.R")
 source("R/stock_drop_and_roll.R")
 
-itw_w <- StockWindow(itw)
-plot(itw_w, "open")
+itw_sm <- SubsetStock(itw, start = "2016-12-01")
+ComputePercentChange(itw_sm)
+ComputePercentChange(itw_sm, plotit = TRUE)
 
-PercentChange(itw, start = "2016-12-01", time = "open")
-PercentChange(itw, time = "open", plotit = TRUE)
-
-PriceChange(itw, start = "2016-12-01", time = "open")
+ComputePriceChange(itw_sm)
 
 
 

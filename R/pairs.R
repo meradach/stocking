@@ -12,50 +12,85 @@ MakePair <- function(stock1, stock2, FUN = `/`, time = "open", center = FALSE, s
   #   center: whether to center the stocks around their mean
   #   scale: whether to scale the stocks by their sd
 
-  # Get names before modifying object
-  name1 <- deparse(substitute(stock1))
-  name2 <- deparse(substitute(stock2))
+  common_data <- .ReturnCommonStockTimePeriod(stock1$data, stock2$data)
+  data1 <- common_data$data1
+  data2 <- common_data$data2
 
-  # Subset to earliest common stock data
-  earliest_common <- max(c(min(stock1$date), min(stock2$date)))
-  stock1          <- stock1[stock1$date >= earliest_common, ]
-  stock2          <- stock2[stock2$date >= earliest_common, ]
+  centered1 <- .CenterPrice(center, data1[[time]])
+  centered2 <- .CenterPrice(center, data2[[time]])
 
-  # Standardize if requested
-  if(center) {
-    stock1_center <- mean(stock1[[time]])
-    stock2_center <- mean(stock2[[time]])
-  } else {
-    stock1_center <- stock2_center <- 0
-  }
-
-  if(scale) {
-    stock1_scale <- sd(stock1[[time]])
-    stock2_scale <- sd(stock2[[time]])
-  } else {
-    stock1_scale <- stock2_scale <- 1
-  }
-
-  stock1_for_pair <- (stock1[[time]] - stock1_center) / stock1_scale
-  stock2_for_pair <- (stock2[[time]] - stock2_scale) / stock2_scale
+  scaled1 <- .ScalePrice(scale, data1[[time]], centered1)
+  scaled2 <- .ScalePrice(scale, data2[[time]], centered2)
 
   # Create list and return special class
-  pair <- list(date     = stock1$date,
-               stock1   = structure(stock1[[time]], symbol = toupper(name1)),
-               stock2   = structure(stock2[[time]], symbol = toupper(name2)),
-               pair     = structure(FUN(stock1_for_pair, stock2_for_pair),
-                                    time = time, FUN = FUN,
-                                    centered = center, scaled = scale)
+  pair <- list(date   = data1$date,
+               price1 = structure(data1[[time]], symbol = stock1$symbol),
+               price2 = structure(data2[[time]], symbol = stock2$symbol),
+               pair   = structure(FUN(scaled1, scaled2),
+                                 time = time, FUN = FUN,
+                                 centered = center, scaled = scale)
   )
 
   structure(pair, class = "pair")
 }
 
 
+# .GetDefaultPairOptions -----------------------------------------------------------------
 
-# PairFun ---------------------------------------------------------------------------
+.GetDefaultPairOptions <- function() {
+  defaults <- list(FUN    = `/`,
+                   time   = "open",
+                   center = FALSE,
+                   scale  = FALSE)
 
-PairFun <- function(pair) {
+  return(defaults)
+}
+
+
+# .ReturnCommonStockTimePeriod ------------------------------------------------------------
+
+.ReturnCommonStockTimePeriod <- function(data1, data2) {
+  # Subset to earliest common stock data
+  earliest_common <- max(c(min(data1$date), min(data2$date)))
+  data1           <- data1[data1$date >= earliest_common, ]
+  data2           <- data2[data2$date >= earliest_common, ]
+
+  out <- list(data1 = data1,
+              data2 = data2)
+}
+
+
+# .CenterPrice -----------------------------------------------------------------------------
+
+.CenterPrice <- function(center, price) {
+  if(center) {
+    price_center <- mean(price)
+  } else {
+    price_center <- 0L
+  }
+
+  centered_price <- price - price_center
+  return(centered_price)
+}
+
+
+# .ScalePrice -----------------------------------------------------------------------------
+
+.ScalePrice <- function(scale, price, centered_price) {
+  if(scale) {
+    price_scale <- sd(price)
+  } else {
+    price_scale <- 1L
+  }
+
+  price_scaled <- centered_price / price_scale
+  return(price_scaled)
+}
+
+
+# .PairFun ---------------------------------------------------------------------------
+
+.PairFun <- function(pair) {
   # Return function used to generate object of class pair from MakePair()
 
   attr(pair$pair, "FUN")
@@ -64,14 +99,16 @@ PairFun <- function(pair) {
 
 # PairStats ----------------------------------------------------------------------------------------
 
-PairStats <- function(pair) {
-  # Computes basic statistics from pair data
+.ComputePairStats <- function(pair) {
+  # Computes basic statistics from class pair
 
-  return(c(mean   = mean(pair$pair),
-           median = median(pair$pair),
-           sd     = sd(pair$pair),
-           min    = min(pair$pair),
-           max    = max(pair$pair))
+  pair_value <- pair$pair
+
+  return(c(mean   = mean(pair_value),
+           median = median(pair_value),
+           sd     = sd(pair_value),
+           min    = min(pair_value),
+           max    = max(pair_value))
   )
 }
 
@@ -79,7 +116,7 @@ PairStats <- function(pair) {
 
 # FindCandidates --------------------------------------------------------------------------
 
-FindCandidates <- function(pair, k = 1, stock = c(1, 2), pos = c("open", "close")) {
+.FindCandidates <- function(pair, k = 1L, stock = c(1L, 2L), pos = c("open", "close")) {
   # Finds opening or closing position candidates
 
   # Args:
@@ -89,11 +126,11 @@ FindCandidates <- function(pair, k = 1, stock = c(1, 2), pos = c("open", "close"
   #   pos: whether function searches for open-position candidates or close-position candidates
 
   # Choose defaults
-  stock <- stock[1]
-  pos   <- pos[1]
+  stock <- stock[1L]
+  pos   <- pos[1L]
 
   # Generate and store pair statistics
-  stats <- PairStats(pair)
+  stats <- .ComputePairStats(pair)
 
   # The threshold of comparison depends on whether we're looking for opening or closing candidates.
   # For open-position candidates, we compare normalied pair values to s.d. * k;
@@ -113,31 +150,54 @@ FindCandidates <- function(pair, k = 1, stock = c(1, 2), pos = c("open", "close"
   # crossing a threshold (a non-zero indicates threshold crossing)
   diff_sign_rel_pair <- diff(sign(norm_pair_rel_th))
 
+
+  candidates <- .ComputeCandidates(stock, pos, diff_rel_pair, diff_sign_rel_pair)
+
+  # Check boundary conditions -- do we open at beginning or close at end?
+  first_element <- .GetInitialPosition(stock, pos, norm_pair_rel_th)
+
+  return(c(first_element, candidates))
+}
+
+
+# .ComputeCandidates ------------------------------------------------------------------------
+
+.ComputeCandidates <- function(stock_num, pos, diff_rel_pair, diff_sign_rel_pair) {
   # Stock 1, "open"  ==> positive value difference and positive sign difference is candidate
   # Stock 1, "close" ==> negative value difference and negative sign difference is candidate
   # Stock 2, "open"  ==> negative value difference and negative sign difference is candidate
   # Stock 2, "close" ==> positive value difference and positive sign difference is candidate
-  candidate <- if((stock == 1 & pos == "open") | (stock == 2 & pos == "close")) {
-    diff_rel_pair > 0  &  diff_sign_rel_pair > 0
+  if((stock_num == 1L & pos == "open") | (stock_num == 2L & pos == "close")) {
+    candidate <- diff_rel_pair > 0  &  diff_sign_rel_pair > 0
   } else {
-    diff_rel_pair < 0  &  diff_sign_rel_pair < 0
+    candidate <- diff_rel_pair < 0  &  diff_sign_rel_pair < 0
   }
 
-  # Check boundary conditions -- do we open at beginning or close at end?
-  element_first <- if(pos == "open") {
-    if(stock == 1) norm_pair_rel_th[1] > 0  else  norm_pair_rel_th[1] < 0
-  } else {
-    FALSE      # we never close a position as our first move
-  }
-
-  return(c(element_first, candidate))
+  return(candidate)
 }
 
 
+# .GetInitialPosition ----------------------------------------------------------------------
 
-# FindPositions --------------------------------------------------------------
+.GetInitialPosition <- function(stock_num, pos, norm_pair_rel_th) {
+  # Check boundary conditions -- do we open at beginning or close at end?
+  if(pos == "open") {
+    if(stock_num == 1) {
+      first_element <- norm_pair_rel_th[1] > 0
+      } else {
+      first_element <- norm_pair_rel_th[1] < 0
+    }
+  } else {
+    first_element <- FALSE      # we never close a position as our first move
+  }
 
-FindPositions <- function(open_candidates, close_candidates) {
+  return(first_element)
+}
+
+
+# .FindPositions --------------------------------------------------------------
+
+.FindPositions <- function(open_candidates, close_candidates) {
   # From a vector of open-position candidates and close-position candidates,
   # this function finds the final open positions and close positions.
 
@@ -152,13 +212,38 @@ FindPositions <- function(open_candidates, close_candidates) {
   # Perform some initial checks.  If you don't open, you don't close.  Return all FALSE.
   # OR if you open on the last day, you also wouldn't trade.
   if(sum(open_candidates) == 0 ||
-     min(which(open_candidates)) == length(open_candidates) ) {
+     min(which(open_candidates)) == length(open_candidates)) {
 
     return(list(open  = rep(FALSE, times = length(open_candidates)),
                 close = rep(FALSE, times = length(close_candidates))))
 
   }
 
+  cand_ix <- .FindCandidateIndices(open_candidates, close_candidates)
+
+  # Find true trades
+  trade_ix <- .FindTrueOpenAndClosePositions(cand_ix$open, cand_ix$close)
+
+  # Finally we reconstruct a logical vector using these indices and put in a list
+  open_pos <- close_pos <- rep(FALSE, length(open_candidates))
+
+  open_pos[trade_ix$open]   <- TRUE
+  close_pos[trade_ix$close] <- TRUE
+
+  # If last move is to open, then make final entry a close so that we're always
+  # cashing out at the end of the exercise
+  if(max(which(open_pos)) > max(which(close_pos))) {
+    close_pos[length(close_pos)] <- TRUE
+  }
+
+  list(open  = open_pos,
+       close = close_pos)
+}
+
+
+# .FindCandidateIndices ------------------------------------------------------------------------
+
+.FindCandidateIndices <- function(open_candidates, close_candidates) {
   # Create vector of candidate open-position indices
   cand_open_ix  <- which(open_candidates)
 
@@ -171,6 +256,16 @@ FindPositions <- function(open_candidates, close_candidates) {
   # Create vector of candidate close-position indices
   cand_close_ix <- which(close_candidates)
 
+  out <- list(open  = cand_open_ix,
+              close = cand_close_ix)
+
+  return(out)
+}
+
+
+# .FindTrueOpenAndClosePositions ------------------------------------------------------------
+
+.FindTrueOpenAndClosePositions <- function(cand_open_ix, cand_close_ix) {
   # Set up values for loop
   open_ix  <- 0                                 # for valid starting sum in loop
   open_vec <- min(cand_open_ix)                 # for seeding final open pos vector
@@ -187,22 +282,11 @@ FindPositions <- function(open_candidates, close_candidates) {
     close_vec <- na.omit(c(close_vec, close_ix))
   }
 
-  # Finally we reconstruct a logical vector using these indices and put in a list
-  open_pos <- close_pos <- rep(FALSE, length(open_candidates))
+  out <- list(open  = open_vec,
+              close = close_vec)
 
-  open_pos[open_vec]   <- TRUE
-  close_pos[close_vec] <- TRUE
-
-  # If last move is to open, then make final entry a close so that we're always
-  # cashing out at the end of the exercise
-  if(max(which(open_pos)) > max(which(close_pos))) {
-    close_pos[length(close_pos)] <- TRUE
-  }
-
-  list(open  = open_pos,
-       close = close_pos)
+  return(out)
 }
-
 
 
 # StockQty -----------------------------------------------------------------------
@@ -210,14 +294,15 @@ FindPositions <- function(open_candidates, close_candidates) {
 StockQty <- function(budget, stock_price) {
   # A simple wrapper to compute the number of shares you can buy with a given budget.
   # Either can be a vector as long as the other is a scalar, otherwise unexpected results!
-  as.integer(floor(budget / stock_price))
+  floor_val <- floor(budget / stock_price)
+  return(as.integer(floor_val))
 }
 
 
 
 # TradeQty ----------------------------------------------------------------------
 
-TradeQty <- function(pair, positions, budget, opening_stock) {
+.TradeQty <- function(pair, positions, budget, opening_stock) {
   # Computes the quantity of stock traded at open and close
 
   # Args:
@@ -231,11 +316,11 @@ TradeQty <- function(pair, positions, budget, opening_stock) {
 
   # Stock quantities associated with this opening_stock value
   if(opening_stock == 1) {
-    selling_stock <- pair$stock1
-    buying_stock  <- pair$stock2
+    selling_stock <- pair$price1
+    buying_stock  <- pair$price2
   } else {
-    selling_stock <- pair$stock2
-    buying_stock  <- pair$stock1
+    selling_stock <- pair$price2
+    buying_stock  <- pair$price1
   }
 
   # When opening a position, define the qty of stock sold (shorted) and stock bought
@@ -252,18 +337,23 @@ TradeQty <- function(pair, positions, budget, opening_stock) {
   }
 
   # Return list
-  list(open_sell_qty = open_sell_qty, open_buy_qty = open_buy_qty,
-       close_buy_qty = close_buy_qty, close_sell_qty = close_sell_qty)
+  out <- list(open_sell_qty  = open_sell_qty,
+              open_buy_qty   = open_buy_qty,
+              close_buy_qty  = close_buy_qty,
+              close_sell_qty = close_sell_qty)
+
+  return(out)
 }
 
 
 
-# FindTrades ----------------------------------------------------------------------
+# .FindTrades ----------------------------------------------------------------------
 
-FindTrades <- function(pair, positions1, positions2, budget) {
+.FindTrades <- function(pair, positions1, positions2, budget) {
   # Uses prices and positions to compute trades
 
   # Args:
+  #   pair: pair object; output of MakePair()
   #   positions*: the output of FindPositions() for stock *
   #   budget: the dollar budget available to the trader FOR EACH BUY
 
@@ -271,25 +361,27 @@ FindTrades <- function(pair, positions1, positions2, budget) {
   #   data frame with open and close buy/sell quantities of stock1 and stock2
 
   # Compute trade quantites for open- and close-positions relative to stock 1 and 2
-  trade_qty_1 <- TradeQty(pair, positions1, budget, opening_stock = 1)
-  trade_qty_2 <- TradeQty(pair, positions2, budget, opening_stock = 2)
+  trade_qty_1 <- .TradeQty(pair, positions1, budget, opening_stock = 1)
+  trade_qty_2 <- .TradeQty(pair, positions2, budget, opening_stock = 2)
 
   # Return trade volumes data frame
-  data.frame(open1_sell1_qty  = trade_qty_1$open_sell_qty,
-             open1_buy2_qty   = trade_qty_1$open_buy_qty,
-             close1_buy1_qty  = trade_qty_1$close_buy_qty,
-             close1_sell2_qty = trade_qty_1$close_sell_qty,
-             open2_buy1_qty   = trade_qty_2$open_buy_qty,
-             open2_sell2_qty  = trade_qty_2$open_sell_qty,
-             close2_sell1_qty = trade_qty_2$close_sell_qty,
-             close2_buy2_qty  = trade_qty_2$close_buy_qty)
+  out <- data.frame(open1_sell1_qty  = trade_qty_1$open_sell_qty,
+                    open1_buy2_qty   = trade_qty_1$open_buy_qty,
+                    close1_buy1_qty  = trade_qty_1$close_buy_qty,
+                    close1_sell2_qty = trade_qty_1$close_sell_qty,
+                    open2_buy1_qty   = trade_qty_2$open_buy_qty,
+                    open2_sell2_qty  = trade_qty_2$open_sell_qty,
+                    close2_sell1_qty = trade_qty_2$close_sell_qty,
+                    close2_buy2_qty  = trade_qty_2$close_buy_qty)
+
+  return(out)
 }
 
 
 
-# FindReturn ---------------------------------------------
+# .FindReturn ---------------------------------------------
 
-FindReturn <- function(pair, trades, budget, trade_fee) {
+.FindReturn <- function(pair, trades, budget, trade_fee) {
   # Computes return from trade
 
   # Args:
@@ -310,19 +402,19 @@ FindReturn <- function(pair, trades, budget, trade_fee) {
   # total_budget_open2 <- budget * n_opens_2
 
   # How much do we spend in opening purchases?
-  expense_1 <- sum(trades$open2_buy1_qty * pair$stock1)
-  expense_2 <- sum(trades$open1_buy2_qty * pair$stock2)
+  expense_1 <- sum(trades$open2_buy1_qty * pair$price1)
+  expense_2 <- sum(trades$open1_buy2_qty * pair$price2)
 
   # At opening, compute the gains from the trades.  This is the money earned by the
   # short sale, less the money spent on buying
-  open1_cash <- sum(trades$open1_sell1_qty * pair$stock1) - expense_2
-  open2_cash <- sum(trades$open2_sell2_qty * pair$stock2) - expense_1
+  open1_cash <- sum(trades$open1_sell1_qty * pair$price1) - expense_2
+  open2_cash <- sum(trades$open2_sell2_qty * pair$price2) - expense_1
 
   # At closing, compute money earned by selling and money lost by buying
-  close1_cash <- sum(-trades$close1_buy1_qty * pair$stock1 +
-                       trades$close1_sell2_qty * pair$stock2)
-  close2_cash <- sum(-trades$close2_buy2_qty * pair$stock2 +
-                       trades$close2_sell1_qty * pair$stock1)
+  close1_cash <- sum(-trades$close1_buy1_qty * pair$price1 +
+                       trades$close1_sell2_qty * pair$price2)
+  close2_cash <- sum(-trades$close2_buy2_qty * pair$price2 +
+                       trades$close2_sell1_qty * pair$price1)
 
   # Data frame trades has one non-zero element for every trade
   n_trades <- sum(trades > 0)
@@ -338,7 +430,7 @@ FindReturn <- function(pair, trades, budget, trade_fee) {
 
 # PairTrade --------------------------------------------------------------------
 
-PairTrade <- function(pair, k, budget, trade_fee) {
+MakePairTrade <- function(pair, k, budget, trade_fee) {
   # Wrapper for entire sequence of pairs trading functions.
   # Performs all calculations to determine return from pairs trading strategy.
 
@@ -351,21 +443,21 @@ PairTrade <- function(pair, k, budget, trade_fee) {
   #   trades_fee: the fee charged per trade event by the broker
 
   # Compute open-position and close-position candidates
-  open_cand_1  <- FindCandidates(pair = pair, k = k, stock = 1, pos = "open")
-  open_cand_2  <- FindCandidates(pair = pair, k = k, stock = 2, pos = "open")
-  close_cand_1 <- FindCandidates(pair = pair, k = k, stock = 1, pos = "close")
-  close_cand_2 <- FindCandidates(pair = pair, k = k, stock = 2, pos = "close")
+  open_cand_1  <- .FindCandidates(pair = pair, k = k, stock = 1, pos = "open")
+  open_cand_2  <- .FindCandidates(pair = pair, k = k, stock = 2, pos = "open")
+  close_cand_1 <- .FindCandidates(pair = pair, k = k, stock = 1, pos = "close")
+  close_cand_2 <- .FindCandidates(pair = pair, k = k, stock = 2, pos = "close")
 
 
   # Compute positions for stock 1 and stock 2
-  pos1 <- FindPositions(open_candidates = open_cand_1, close_candidates = close_cand_1)
-  pos2 <- FindPositions(open_candidates = open_cand_2, close_candidates = close_cand_2)
+  pos1 <- .FindPositions(open_candidates = open_cand_1, close_candidates = close_cand_1)
+  pos2 <- .FindPositions(open_candidates = open_cand_2, close_candidates = close_cand_2)
 
   # Compute trade volume
-  trades <- FindTrades(pair = pair, positions1 = pos1, positions2 = pos2, budget = budget)
+  trades <- .FindTrades(pair = pair, positions1 = pos1, positions2 = pos2, budget = budget)
 
   # Compute return
-  return     <- FindReturn(pair = pair, trades = trades, budget = budget, trade_fee = trade_fee)
+  return     <- .FindReturn(pair = pair, trades = trades, budget = budget, trade_fee = trade_fee)
   spent      <- attr(return, "amt_spent")
   pct_return <- if(spent == 0)  0  else as.numeric(return) / spent * 100
 
@@ -375,13 +467,13 @@ PairTrade <- function(pair, k, budget, trade_fee) {
                       pct_return  = pct_return,
                       amt_pledged = budget * attr(return, "n_trades")/4,
                       n_trades    = attr(return, "n_trades"),
-                      stock1      = attr(pair$stock1, "symbol"),
-                      stock2      = attr(pair$stock2, "symbol"),
+                      stock1      = attr(pair$price1, "symbol"),
+                      stock2      = attr(pair$price2, "symbol"),
                       k           = k,
                       budget      = budget,
                       trade_fee   = trade_fee,
                       time        = attr(pair$pair, "time"),
-                      FUN         = PairFun(pair),
+                      FUN         = .PairFun(pair),
                       centered    = attr(pair$pair, "centered"),
                       scaled      = attr(pair$pair, "scaled"))
 
@@ -391,7 +483,7 @@ PairTrade <- function(pair, k, budget, trade_fee) {
 
 #  PairSplit --------------------------------------------------------------------
 
-PairSplit <- function(pair, split, start = "min", end = "max") {
+SplitPair <- function(pair, split, start = "min", end = "max") {
   # Splits pair data into two lists, one for training and one for testing.
 
   # Args:
@@ -403,10 +495,10 @@ PairSplit <- function(pair, split, start = "min", end = "max") {
   #          the latest date ("max") in the pair object will be used.
 
   # Retrieve attributes
-  nm1 <- attr(pair$stock1, "symbol")
-  nm2 <- attr(pair$stock2, "symbol")
+  nm1 <- attr(pair$price1, "symbol")
+  nm2 <- attr(pair$price2, "symbol")
   tm  <- attr(pair$pair, "time")
-  fn  <- PairFun(pair)
+  fn  <- .PairFun(pair)
   ct  <- attr(pair$pair, "centered")
   sc  <- attr(pair$pair, "scaled")
 
@@ -427,13 +519,14 @@ PairSplit <- function(pair, split, start = "min", end = "max") {
   pair_list <- list(train = train, test = test)
 
   for(i in 1:length(pair_list)) {
-    attr(pair_list[[i]]$stock1, "symbol") <- nm1
-    attr(pair_list[[i]]$stock2, "symbol") <- nm2
+    attr(pair_list[[i]]$price1, "symbol") <- nm1
+    attr(pair_list[[i]]$price2, "symbol") <- nm2
     attributes(pair_list[[i]]$pair) <- list(time = tm, FUN = fn, centered = ct, scaled = sc)
     attr(pair_list[[i]], "class") <- "pair"
     out[[i]] <- pair_list[[i]]
   }
-  out
+
+  return(out)
 }
 
 
@@ -459,10 +552,12 @@ predict.pair_model <- function(object, newdata, ...) {
   # Get return from test data based on parameters of pair_model object.
   # Pass test pair to argument "newdata".
 
-  PairTrade(pair = newdata,
-            k = object$k,
-            budget = object$budget,
-            trade_fee = object$trade_fee)
+  trade <- MakePairTrade(pair      = newdata,
+                         k         = object$k,
+                         budget    = object$budget,
+                         trade_fee = object$trade_fee)
+
+  return(trade)
 }
 
 
@@ -479,28 +574,28 @@ predict.pair_model <- function(object, newdata, ...) {
 
 # plot.pair -----------------------------------------------------------------------
 
-PlotPositionsData <- function(pair, k) {
+.MakePlotPositionsData <- function(pair, k) {
   # Builds positions data for plotting function if type == "positions"
 
   # Compute open-position and close-position candidates
-  open_cand_1  <- FindCandidates(pair = pair, k = k, stock = 1, pos = "open")
-  open_cand_2  <- FindCandidates(pair = pair, k = k, stock = 2, pos = "open")
-  close_cand_1 <- FindCandidates(pair = pair, k = k, stock = 1, pos = "close")
-  close_cand_2 <- FindCandidates(pair = pair, k = k, stock = 2, pos = "close")
+  open_cand_1  <- .FindCandidates(pair = pair, k = k, stock = 1, pos = "open")
+  open_cand_2  <- .FindCandidates(pair = pair, k = k, stock = 2, pos = "open")
+  close_cand_1 <- .FindCandidates(pair = pair, k = k, stock = 1, pos = "close")
+  close_cand_2 <- .FindCandidates(pair = pair, k = k, stock = 2, pos = "close")
 
   # Compute positions for stock 1 and stock 2
-  pos1 <- FindPositions(open_candidates = open_cand_1, close_candidates = close_cand_1)
-  pos2 <- FindPositions(open_candidates = open_cand_2, close_candidates = close_cand_2)
+  pos1 <- .FindPositions(open_candidates = open_cand_1, close_candidates = close_cand_1)
+  pos2 <- .FindPositions(open_candidates = open_cand_2, close_candidates = close_cand_2)
 
   # Build data frame
-  dat <- data.frame(pos1, pos2)
+  dat        <- data.frame(pos1, pos2)
   names(dat) <- c("open1", "close1", "open2", "close2")
 
-  dat
+  return(dat)
 }
 
 
-RectColors <- function(plot_positions) {
+.ComputeRectColors <- function(plot_positions) {
   # A function for use within RectData() that determines on which side of the mean
   # the trade is happening, so it can be colored accordingly
 
@@ -534,11 +629,13 @@ RectColors <- function(plot_positions) {
   orders <- ddiff[ddiff != 0]
 
   # And we return a vector to describe the action in each move
-  factor(ifelse(orders == 1, "Above", "Below"))
+  out <- factor(ifelse(orders == 1, "Above", "Below"))
+
+  return(out)
 }
 
 
-RectData <- function(pair, plot_positions) {
+.MakeRectData <- function(pair, plot_positions) {
   # Creates rectangle coordinates for plot
 
   # Args:
@@ -557,14 +654,14 @@ RectData <- function(pair, plot_positions) {
   ymax <- rep(max(pair$pair), times = length(xmin))
 
   # Color data
-  cols <- RectColors(plot_positions)
+  cols <- .ComputeRectColors(plot_positions)
 
   # Data frame for plotting
   data.frame(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax, Open = cols)
 }
 
 
-PositionsPlot <- function(x, k) {
+PlotPairPositions <- function(x, k) {
   # Creates ggplot object of pair value with highlighted positions
 
   # Args:
@@ -576,13 +673,13 @@ PositionsPlot <- function(x, k) {
   pair_df <- as.data.frame(unclass(x))
 
   # Generate data frame of positions
-  pos_df <- PlotPositionsData(x, k)
+  pos_df <- .MakePlotPositionsData(x, k)
 
   # Generate data frame of rectangle coordinates
-  rect_df <- RectData(x, pos_df)
+  rect_df <- .MakeRectData(x, pos_df)
 
   # Compute statistics
-  stat    <- PairStats(x)
+  stat            <- .ComputePairStats(x)
   threshold_upper <- stat["mean"] + k*stat["sd"]
   threshold_lower <- stat["mean"] - k*stat["sd"]
 
@@ -590,6 +687,16 @@ PositionsPlot <- function(x, k) {
   # (if this is not corrected, you might get rectangles that don't fill the space)
   rect_df$ymin <- pmin(threshold_lower, rect_df$ymin)
   rect_df$ymax <- pmax(threshold_upper, rect_df$ymax)
+
+  # Some plot title stuff
+  nm1 <- attr(x$price1, "symbol")
+  nm2 <- attr(x$price2, "symbol")
+  fun <- substr(deparse(.PairFun(x)), 13, 13)
+  ctr <- attr(x$pair, "centered")
+  scl <- attr(x$pair, "scaled")
+  tm  <- attr(x$pair, "time")
+  title <- paste0("Pairs trading:  ", nm1, " ", fun, " ", nm2, " at ", tm,
+                  if(ctr) {", centered"}, if(scl) {", scaled"})
 
   # Generate plot
   p <- ggplot(NULL) +
@@ -601,37 +708,38 @@ PositionsPlot <- function(x, k) {
     geom_hline(yintercept = c(stat["mean"] + k*stat["sd"], stat["mean"] - k*stat["sd"]),
                color = "darkgrey", lty = 3, lwd = 1.2) +
     geom_line(data = pair_df, aes(x = date, y = pair), lwd = 1.2) +
-    labs(x = "Date", y = "Pair Value", title = "Trading Periods") +
+    labs(x = "Date", y = "Pair Value", title = title) +
     theme_bw()
 
   return(p)
 }
 
 
-StockPlot <- function(x) {
+PlotPairStocks <- function(x) {
   # Creates ggplot object of stock history for stock1 and stock2
 
   # Args:
   #   x: object of class "pair"
 
   # Get attributes for use in plot
-  name1 <- attr(x$stock1, "symbol")
-  name2 <- attr(x$stock2, "symbol")
+  name1 <- attr(x$price1, "symbol")
+  name2 <- attr(x$price2, "symbol")
   time  <- attr(x$pair, "time")
   time  <- paste0(toupper(substr(time, 1, 1)), substr(time, 2, nchar(time)))
 
   # Make data frame for plotting
   df <- data.frame(date   = rep(x$date, 2),
-                   stock  = c(x$stock1, x$stock2),
+                   price  = c(x$price1, x$price2),
                    Symbol = factor(
                               rep(c(name1, name2), each = length(x$date)),
                               levels = c(name1, name2))
                    )
 
   # Plot data
-  p <- ggplot(df, aes(x = date, y = stock, color = Symbol)) +
+  p <- ggplot(df, aes(x = date, y = price, color = Symbol)) +
     geom_line(lwd = 1.2) +
-    labs(x = "Date", y = paste("Price at", time)) +
+    labs(x = "Date", y = paste("Price at", time),
+         title = paste0("Price at ", time, ", ", name1, " and ", name2)) +
     theme_bw()
 
   return(p)
@@ -659,9 +767,9 @@ plot.pair <- function(x, k, type = "positions", ...) {
 
   # Proceed according to desired plot type
   if(type == "positions") {
-    p <- PositionsPlot(x, k)
+    p <- PlotPairPositions(x, k)
   } else {
-    p <- StockPlot(x)
+    p <- PlotPairStocks(x)
   }
 
   return(p)
