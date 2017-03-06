@@ -37,24 +37,59 @@ SubsetStock <- function(stock, start = "min", end = "max") {
   #   an object of class stock
 
   # Supply defaults
-  if(start == "min" || start < stock$start) {
-    stock$start <- min(stock$data$date)
-  } else {
-    stock$start <- start
+  if(start == "min" || start < stock$data$date[1L]) {
+    start <- stock$data$date[1L]
   }
-  if(end == "max" || end > stock$end) {
-    stock$end <- max(stock$data$date)
-  } else {
-    stock$end <- end
+
+  if(end == "max" || end > stock$data$date[nrow(stock$data)]) {
+    end <- stock$data$date[nrow(stock$data)]
   }
 
   # Subset data and replace data with subsetted version
-  stock_data <- stock$data[stock$data$date >= stock$start &
-                             stock$data$date <= stock$end, ]
-  stock$data <- stock_data
+  stock_data <- stock$data[stock$data$date >= start &
+                             stock$data$date <= end, ]
+  stock$data  <- stock_data
+  stock$start <- stock$data$date[1L]
+  stock$end   <- stock$data$date[nrow(stock$data)]
 
   # Return output
   return(stock)
+}
+
+
+SplitStock <- function(stock, split, start = "min", end = "max") {
+  # Splits stock data into two objects, one for training and one for testing.
+
+  # Args:
+  #   stock: object of class "stock"
+  #   split: the DATE on which to begin the test data in yyyy-mm-dd format
+  #   start: optional start date of TRAINING data.  If not specified,
+  #          the earliest date ("min") in the pair object will be used.
+  #   end:   the latest data of the TEST data.  If not specified,
+  #          the latest date ("max") in the pair object will be used.
+
+  # Control
+  if(!is.stock(stock)) {
+    stop("Please provide an object of class 'stock'.")
+  }
+
+  split <- if(split %in% stock$data$date) {
+    train_end <- max(stock$data$date[stock$data$date < split])
+  } else {
+    train_end <- split
+  }
+
+  train <- SubsetStock(stock, start = start, end = train_end)
+  # if(train$end == split) {
+  #   train <- SubsetStock(train, end = train$data$date[length(train$data$date) - 1])
+  # }
+
+  test  <- SubsetStock(stock, start = split, end = end)
+
+  out <- list(train = train,
+              test  = test)
+
+  return(out)
 }
 
 

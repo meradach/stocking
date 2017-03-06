@@ -15,6 +15,10 @@ library(ggplot2)
 library(viridis)
 plot(itw_2017)
 
+debug(SubsetStock)
 itw_subsetted <- SubsetStock(itw, start = "2016-03-01")
 str(itw_subsetted)
 plot(itw_subsetted)
+
+itw_split <- SplitStock(itw, split = "1994-01-01")
+str(itw_split)

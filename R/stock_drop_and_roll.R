@@ -34,7 +34,7 @@ ComputePercentChange <- function(stock, plotit = FALSE) {
 ################################################################################
 
 .ComputePercentageChange <- function(vector) {
-  if(length(vector != 2)) stop("Problem with input vector in .ComputePercentageChange")
+  if(length(vector) != 2) stop("Problem with input vector in .ComputePercentageChange")
   first <- vector[1]
   last  <- vector[2]
   absolute_change <- last - first
@@ -55,7 +55,7 @@ ComputePriceChange <- function(stock) {
 
   pct_change <- ComputePercentChange(stock, plotit = FALSE)
   out <- list(open  = attr(pct_change$open, "price_change"),
-             close = attr(pct_change$close, "price_change"))
+              close = attr(pct_change$close, "price_change"))
 
   return(out)
 }
@@ -248,34 +248,32 @@ ComputePriceChange <- function(stock) {
 
 # BuyAndHoldSingle -----------------------------------------------------------------------
 
-BuyAndHoldSingle <- function(stock, budget, trade_fee = 9, time = "open") {
+BuyAndHoldSingle <- function(price, budget, trade_fee = 9) {
   # Compute earnings from buy-and-hold strategy over entire stock history provided.
   # Use this as a benchmark to compare any trading strategy attempted.
 
   if(budget > 0) {
-    buy_price  <- stock[[time]][1L]
-    sell_price <- stock[[time]][nrow(stock)]
+    buy_price  <- price[1L]
+    sell_price <- price[length(price)]
 
     buy_qty  <- StockQty(budget, buy_price)
 
-    money_in  <- buy_price * buy_qty + trade_fee*2L  # only two trades are ever made in this approach
+    money_in  <- buy_price * buy_qty + trade_fee * 2  # only two trades are ever made in this approach
     money_out <- sell_price * buy_qty
 
-    return_cash <- money_out - money_in
-    return_pct  <- return_cash / money_in * 100
+    net_cash   <- money_out - money_in
+    pct_return <- net_cash / money_in * 100
 
-    out_list <-
-      list(return   = round(return_cash, 2),
-           amt_spent  = round(money_in, 2),
-           pct_return = round(return_pct, 2))
+    out <- list(net_return   = round(net_cash, 2),
+                amt_spent  = round(money_in, 2),
+                pct_return = round(pct_return, 2))
   } else {
-    out_list <-
-      list(return     = 0,
-           amt_spent  = 0,
-           pct_return = 0)
+    out <- list(net_return = 0,
+                amt_spend  = 0,
+                pct_return = 0)
   }
 
-  return(out_list)
+  return(out)
 }
 
 
@@ -285,39 +283,41 @@ BuyAndHoldSingle <- function(stock, budget, trade_fee = 9, time = "open") {
 StockDropAndRoll <- function(stock, budget, pct_change, reversion_pct, search_window = 1,
                              action_delay = 0, trade_fee = 9, time = "open") {
   # Performs all steps to compute return from stock change trading strategy
+  price <- stock$data[[time]]
 
-  change_candidates <- StockChangeCandidates(stock, pct_change, search_window, time)
-  post_change_dates <- PostChangeDate(change_candidates)
-  actions           <- PostChangeDateActionDelay(post_change_dates, action_delay)
+  change_candidates <- .FindStockChangeCandidates(price, pct_change, search_window)
+  post_change_dates <- .FindEarliestDateAmongConsecutives(change_candidates)
+  actions           <- .AddWaitTimeBeforeAction(post_change_dates, action_delay)
 
-  trades            <- ProduceTrades(stock, actions, reversion_pct, time)
+  trades            <- .ProduceTrades(price, actions, reversion_pct)
 
-  stock_drop_returns <- CalculateStockDropReturn(stock, trades, budget, trade_fee, pct_change, time)
+  stock_drop_returns <- .CalculateStockDropReturn(price, trades, budget, trade_fee, pct_change)
 
-  buy_and_hold_returns <- BuyAndHoldSingle(stock = stock,
-                                           budget = budget * stock_drop_returns$n_trades / 2L,
-                                           trade_fee = trade_fee,
-                                           time = time)
+  buy_and_hold_returns <- BuyAndHoldSingle(price,
+                                           budget = budget * stock_drop_returns$n_trades / 2,
+                                           trade_fee = trade_fee)
 
   drop_list <- list(stock_drop_returns,
-                    source                = toupper(deparse(substitute(stock))),
-                    budget                = budget,
-                    pct_change_trigger    = pct_change,
-                    reversion_pct_trigger = reversion_pct,
-                    search_window         = search_window,
-                    action_delay          = action_delay,
-                    trade_fee             = trade_fee,
-                    time                  = time,
+                    symbol                   = stock$symbol,
+                    budget                   = budget,
+                    pct_change_trigger       = pct_change,
+                    reversion_pct_trigger    = reversion_pct,
+                    search_window            = search_window,
+                    action_delay             = action_delay,
+                    trade_fee                = trade_fee,
+                    time                     = time,
                     pct_return_buy_and_hold  = buy_and_hold_returns$pct_return,
-                    points_over_buy_and_hold = stock_drop_returns$pct_return - buy_and_hold_returns$pct_return,
-                    stock[c("date", time)],
+                    points_over_buy_and_hold = stock_drop_returns$pct_return -
+                                                 buy_and_hold_returns$pct_return,
+                    stock$data[c("date", time)],
                     trades)
 
   drop_return <- unlist(drop_list, recursive = FALSE)
 
   names(drop_return)[grepl(time, names(drop_return))] <- "price"
 
-  structure(drop_return, class = "drop_model")
+  out <- structure(drop_return, class = "drop_model")
+  return(out)
 }
 
 
@@ -327,9 +327,9 @@ StockDropAndRoll <- function(stock, budget, pct_change, reversion_pct, search_wi
 print.drop_model <- function(x, ...) {
   # Makes readable format for drop_model object
 
-  line1 <- paste0("Stock:                    ", x$stock)
+  line1 <- paste0("Stock:                    ", x$symbol)
   line2 <- paste0("Amount spent:             ", x$amt_spent, 2)
-  line3 <- paste0("Net return:               ", x$return, 2)
+  line3 <- paste0("Net return:               ", x$net_return, 2)
   line4 <- paste0("Percent return:           ", x$pct_return, 3)
   line5 <- paste0("Points over buy-and-hold: ", round(x$points_over_buy_and_hold, 2))
 
@@ -345,21 +345,21 @@ predict.drop_model <- function(object, newdata, ...) {
   # Get return from test data based on parameters of drop_model object.
   # Pass test stock data to argument "newdata".
 
-  StockDropAndRoll(stock = newdata,
-                   budget = object$budget,
-                   pct_change = object$pct_change_trigger,
-                   reversion_pct = object$reversion_pct_trigger,
-                   search_window = object$search_window,
-                   action_delay = object$action_delay,
-                   trade_fee = object$trade_fee,
-                   time = object$time)
+  out <- StockDropAndRoll(stock = newdata,
+                          budget = object$budget,
+                          pct_change = object$pct_change_trigger,
+                          reversion_pct = object$reversion_pct_trigger,
+                          search_window = object$search_window,
+                          action_delay = object$action_delay,
+                          trade_fee = object$trade_fee,
+                          time = object$time)
 }
 
 
 # plot.drop_model  -------------------------------------------------------------------
 
 
-RectDataDrop <- function(price, date, actions, reversions) {
+.ComputeRectDataDrop <- function(price, date, actions, reversions) {
   # Creates rectangle coordinates for plot
 
   # Args:
@@ -379,7 +379,7 @@ RectDataDrop <- function(price, date, actions, reversions) {
 }
 
 
-PlotDataDrop <- function(drop_model) {
+.MakePlotDataDrop <- function(drop_model) {
   # Creates data frame for ggplot2
 
   data.frame(date = drop_model$date,
@@ -393,8 +393,8 @@ plot.drop_model <- function(x, ...) {
   # Args:
   #   x: object of class drop_model
 
-  rect_df   <- RectDataDrop(x$price, x$date, x$actions, x$reversions)
-  plot_data <- PlotDataDrop(x)
+  rect_df   <- .ComputeRectDataDrop(x$price, x$date, x$actions, x$reversions)
+  plot_data <- .MakePlotDataDrop(x)
 
   ggplot(NULL) +
     geom_rect(data = rect_df,

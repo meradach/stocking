@@ -1,49 +1,79 @@
 # MakePair -------------------------------------------------------------------------------------
 
-MakePair <- function(stock1, stock2, FUN = `/`, time = "open", center = FALSE, scale = FALSE) {
+MakePair <- function(stock1, stock2, options) {
   # Makes an object of class "pair".
   # Takes stock1 and stock2 and uses FUN to create a vector that relates
   # the daily prices of the stocks at the requested time (open or close).
 
   # Args:
   #   stock1, stock2: two objects of class "stock".  stock1 will be the first argument to FUN.
-  #   FUN: the function to apply to the stocks, e.g. `/` or `-`.
-  #   time: "open" or "close", the time at which to compute the function of prices each day.
-  #   center: whether to center the stocks around their mean
-  #   scale: whether to scale the stocks by their sd
+  #   options: the options list (see .GetDefaultPairOptions())
+
+  options <- .CheckPairOptions(options)
 
   common_data <- .ReturnCommonStockTimePeriod(stock1$data, stock2$data)
-  data1 <- common_data$data1
-  data2 <- common_data$data2
+  stock1_price <- common_data$data1[[options$time]]
+  stock2_price <- common_data$data2[[options$time]]
+  common_date  <- common_data$data1$date
 
-  centered1 <- .CenterPrice(center, data1[[time]])
-  centered2 <- .CenterPrice(center, data2[[time]])
+  centered1 <- .CenterPrice(options$center, stock1_price)
+  centered2 <- .CenterPrice(options$center, stock2_price)
 
-  scaled1 <- .ScalePrice(scale, data1[[time]], centered1)
-  scaled2 <- .ScalePrice(scale, data2[[time]], centered2)
+  # If you're centering you're not changing the variability -- can we rework
+  # this function to only require price or centered price rather than both?
+  scaled1 <- .ScalePrice(options$scale, centered1)
+  scaled2 <- .ScalePrice(options$scale, centered2)
 
   # Create list and return special class
-  pair <- list(date   = data1$date,
-               price1 = structure(data1[[time]], symbol = stock1$symbol),
-               price2 = structure(data2[[time]], symbol = stock2$symbol),
-               pair   = structure(FUN(scaled1, scaled2),
-                                 time = time, FUN = FUN,
-                                 centered = center, scaled = scale)
+  pair <- list(date   = common_date,
+               price1 = structure(stock1_price, symbol = stock1$symbol),
+               price2 = structure(stock2_price, symbol = stock2$symbol),
+               pair   = structure(options$FUN(scaled1, scaled2),
+                                 time     = options$time,
+                                 FUN      = options$FUN,
+                                 centered = options$center,
+                                 scaled   = options$scale)
   )
 
   structure(pair, class = "pair")
 }
 
 
+#---------------------------------------------------------
+
+is.pair <- function(x) {
+  inherits(x, "pair")
+}
+
+
 # .GetDefaultPairOptions -----------------------------------------------------------------
 
 .GetDefaultPairOptions <- function() {
+  #   FUN: the function to apply to the stocks, e.g. `/` or `-`.
+  #   time: "open" or "close", the time at which to compute the function of prices each day.
+  #   center: whether to center the stocks around their mean
+  #   scale: whether to scale the stocks by their sd
+
   defaults <- list(FUN    = `/`,
                    time   = "open",
                    center = FALSE,
                    scale  = FALSE)
 
   return(defaults)
+}
+
+
+#-------------------------------------------------------------------------
+
+.CheckPairOptions <- function(options) {
+  output <- .GetDefaultPairOptions()
+
+  if(!missing(options)) {
+    replacements <- names(output) %in% names(options)
+    output[replacements] <- options
+  }
+
+  return(output)
 }
 
 
@@ -76,14 +106,14 @@ MakePair <- function(stock1, stock2, FUN = `/`, time = "open", center = FALSE, s
 
 # .ScalePrice -----------------------------------------------------------------------------
 
-.ScalePrice <- function(scale, price, centered_price) {
+.ScalePrice <- function(scale, price) {
   if(scale) {
     price_scale <- sd(price)
   } else {
     price_scale <- 1L
   }
 
-  price_scaled <- centered_price / price_scale
+  price_scaled <- price / price_scale
   return(price_scaled)
 }
 
@@ -489,10 +519,15 @@ SplitPair <- function(pair, split, start = "min", end = "max") {
   # Args:
   #   pair: object of class "pair" from MakePair()
   #   split: the DATE on which to begin the test data in yyyy-mm-dd format
-  #   start: optional start date of training data.  If not specified,
+  #   start: optional start date of TRAINING data.  If not specified,
   #          the earliest date ("min") in the pair object will be used.
-  #   end:   the latest data of the testing data.  If not specified,
+  #   end:   the latest data of the TEST data.  If not specified,
   #          the latest date ("max") in the pair object will be used.
+
+  # Control
+  if(!is.pair(pair)) {
+    stop("Please provide an object of class 'pair'.")
+  }
 
   # Retrieve attributes
   nm1 <- attr(pair$price1, "symbol")
